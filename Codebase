@@ -1,0 +1,326 @@
+Claude is AI and can make mistakes. Please double-check responses.
+import { useState } from "react";
+
+const CLOUD_ID = "f8519793-3215-4b8b-9f9a-3c66dd15afc5";
+
+function extractIssueKey(input) {
+  const trimmed = input.trim();
+  const keyMatch = trimmed.match(/DEFT-\d+/i);
+  if (keyMatch) return keyMatch[0].toUpperCase();
+  return null;
+}
+
+async function callClaude(prompt) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const data = await res.json();
+  return data.content?.[0]?.text || "";
+}
+
+const resources = [
+  { icon: "👤", label: "ICS DSA Bug Management Driver", value: "Isaac Obamehinti", link: null, color: "#6366f1" },
+  { icon: "📊", label: "Bug Management Process Deck", value: "ICS DSA Bug Management Slides", link: "https://docs.google.com/presentation/d/1u126YMn9TBgWqDFLrx7HWOgoiJLOvkxw6IcfParS9OM/edit?usp=sharing", color: "#f59e0b" },
+  { icon: "📖", label: "DEFT Wiki", value: "ICS DSA Bug Management Process", link: "https://wiki.cloud.intuit.com/wiki/spaces/ICSDR/pages/340657930/ICS+DSA+Bug+Management+Process+New+process+as+of+Jan+2026", color: "#22c55e" },
+  { icon: "💬", label: "Slack Channel", value: "#ics-dsa-deft-bugs", link: "https://intuit.enterprise.slack.com/archives/C07TK2ZQULB", color: "#818cf8" },
+  { icon: "📅", label: "Daily Triage Sync", value: "8:30 – 9:00 AM · Zoom Link", link: "https://intuit.zoom.us/s/92628817605?pwd=YtxrtBjbuJ8vq30GG3u9IHgsfAhXnR.1&from=addon#success", color: "#06b6d4", isZoom: true },
+];
+
+export default function App() {
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [stage, setStage] = useState("");
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [refineInput, setRefineInput] = useState("");
+  const [refining, setRefining] = useState(false);
+
+  async function handleAnalyze() {
+    const key = extractIssueKey(input);
+    if (!key) { setError("Please enter a valid DEFT ticket key or URL (e.g. DEFT-109)"); return; }
+    setError(""); setResult(null); setLoading(true);
+    try {
+      setStage("🔍 Fetching ticket details...");
+      const ticketRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          mcp_servers: [{ type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian-mcp" }],
+          messages: [{ role: "user", content: `Fetch Jira issue ${key} from cloudId ${CLOUD_ID}. Return ONLY a JSON object: {"summary":"","description":"","status":"","assignee":"","priority":""}. description max 600 chars. No markdown.` }]
+        })
+      });
+      const ticketData = await ticketRes.json();
+      const ticketText = ticketData.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+      let ticketInfo = {};
+      try { const m = ticketText.match(/\{[\s\S]*\}/); if (m) ticketInfo = JSON.parse(m[0]); } catch { ticketInfo = { summary: key, description: ticketText.slice(0, 400) }; }
+
+      setStage("📚 Searching historical DEFT bugs for patterns...");
+      const historyRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1500,
+          mcp_servers: [{ type: "url", url: "https://mcp.atlassian.com/v1/mcp", name: "atlassian-mcp" }],
+          messages: [{ role: "user", content: `Search DEFT project in Jira (cloudId: ${CLOUD_ID}) for bugs similar to: "${ticketInfo.summary}". JQL: project = DEFT AND issuetype = Bug AND statusCategory = Done ORDER BY updated DESC, maxResults 15. Return ONLY a JSON array of up to 8 most relevant bugs: [{"key":"","summary":"","assignee":"","resolutiondate":""}]. No markdown.` }]
+        })
+      });
+      const historyData = await historyRes.json();
+      const historyText = historyData.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+      let historicalBugs = [];
+      try { const m = historyText.match(/\[[\s\S]*\]/); if (m) historicalBugs = JSON.parse(m[0]); } catch { historicalBugs = []; }
+
+      setStage("🧠 Generating recommendation...");
+      const analysisText = await callClaude(`You are a Jira triage assistant for the DEFT project at Intuit.
+
+Bug to assign:
+- Key: ${key}
+- Summary: ${ticketInfo.summary}
+- Description: ${ticketInfo.description?.slice(0, 500)}
+- Priority: ${ticketInfo.priority}
+- Current Assignee: ${ticketInfo.assignee || "Unassigned / Inactive"}
+
+Recently resolved similar bugs:
+${historicalBugs.map(b => `- ${b.key}: "${b.summary}" resolved by ${b.assignee} (${b.resolutiondate?.slice(0,10) || "unknown"})`).join("\n")}
+
+Respond ONLY in this JSON format:
+{"primary":{"name":"","email":"","confidence":"High|Medium|Low","reasoning":""},"alternative":{"name":"","email":"","reasoning":""},"supportingEvidence":["","",""],"caveat":""}`);
+
+      let analysis = {};
+      try { const m = analysisText.match(/\{[\s\S]*\}/); if (m) analysis = JSON.parse(m[0]); } catch { analysis = { primary: { name: "Unable to determine", reasoning: analysisText } }; }
+      setResult({ key, ticketInfo, historicalBugs, analysis });
+    } catch (e) {
+      setError("Something went wrong: " + e.message);
+    } finally { setLoading(false); setStage(""); }
+  }
+
+  async function handleRefine() {
+    if (!refineInput.trim() || !result) return;
+    setRefining(true);
+    try {
+      const refined = await callClaude(`You are a Jira triage assistant for the DEFT project at Intuit.
+
+Previous recommendation for ${result.key}:
+- Primary: ${result.analysis.primary?.name} (${result.analysis.primary?.confidence} confidence)
+- Reasoning: ${result.analysis.primary?.reasoning}
+- Alternative: ${result.analysis.alternative?.name}
+
+User refinement request: "${refineInput}"
+
+Ticket context:
+- Summary: ${result.ticketInfo.summary}
+- Priority: ${result.ticketInfo.priority}
+- Current Assignee: ${result.ticketInfo.assignee || "Unassigned"}
+
+Historical bugs used:
+${result.historicalBugs.map(b => `- ${b.key}: "${b.summary}" resolved by ${b.assignee}`).join("\n")}
+
+Update the recommendation based on the user's refinement. Respond ONLY in this JSON format:
+{"primary":{"name":"","email":"","confidence":"High|Medium|Low","reasoning":""},"alternative":{"name":"","email":"","reasoning":""},"supportingEvidence":["","",""],"caveat":""}`);
+
+      let analysis = {};
+      try { const m = refined.match(/\{[\s\S]*\}/); if (m) analysis = JSON.parse(m[0]); } catch { analysis = result.analysis; }
+      setResult(prev => ({ ...prev, analysis }));
+      setRefineInput("");
+    } catch (e) {
+      setError("Refinement failed: " + e.message);
+    } finally { setRefining(false); }
+  }
+
+  const confColor = { High: "#22c55e", Medium: "#f59e0b", Low: "#ef4444" };
+
+  return (
+    <div style={{ fontFamily: "'Inter', sans-serif", minHeight: "100vh", background: "#0f172a", color: "#e2e8f0" }}>
+      <div style={{ background: "linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)", borderBottom: "1px solid #3730a3", padding: "20px 24px" }}>
+        <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: "linear-gradient(135deg, #6366f1, #8b5cf6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>🎯</div>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#f1f5f9" }}>DEFT Bug Assignee Suggester</h1>
+            <p style={{ margin: 0, fontSize: 13, color: "#a5b4fc" }}>AI-powered triage using historical DEFT resolution data · ICS Data Science & Analytics</p>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 780, margin: "0 auto", padding: "24px" }}>
+        <div style={{ background: "#1e293b", borderRadius: 14, padding: "18px 20px", marginBottom: 24, border: "1px solid #334155" }}>
+          <p style={{ margin: "0 0 14px", fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em" }}>📌 Quick References</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10 }}>
+            {resources.map((r, i) => (
+              <div key={i} style={{ background: "#0f172a", borderRadius: 10, padding: "10px 12px", border: `1px solid ${r.color}33`, display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>{r.icon}</span>
+                <div style={{ minWidth: 0 }}>
+                  <p style={{ margin: "0 0 2px", fontSize: 11, color: "#64748b", fontWeight: 600 }}>{r.label}</p>
+                  {r.link && !r.isZoom ? (
+                    <a href={r.link} target="_blank" rel="noreferrer" style={{ color: r.color, fontSize: 13, fontWeight: 600, textDecoration: "none", wordBreak: "break-word" }}
+                      onMouseOver={e => e.target.style.textDecoration = "underline"} onMouseOut={e => e.target.style.textDecoration = "none"}>
+                      {r.value} ↗
+                    </a>
+                  ) : r.isZoom ? (
+                    <a href={r.link} target="_blank" rel="noreferrer" style={{ color: r.color, fontSize: 13, fontWeight: 600, textDecoration: "none" }}
+                      onMouseOver={e => e.target.style.textDecoration = "underline"} onMouseOut={e => e.target.style.textDecoration = "none"}>
+                      8:30 – 9:00 AM · Join Zoom ↗
+                    </a>
+                  ) : (
+                    <p style={{ margin: 0, color: r.color, fontSize: 13, fontWeight: 600 }}>{r.value}</p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, marginBottom: 24, border: "1px solid #334155" }}>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: "#94a3b8", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>Enter DEFT Ticket Key or URL</label>
+          <div style={{ display: "flex", gap: 10 }}>
+            <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !loading && handleAnalyze()}
+              placeholder="e.g. DEFT-109  or  https://jira.cloud.intuit.com/browse/DEFT-109"
+              style={{ flex: 1, background: "#0f172a", border: "1px solid #475569", borderRadius: 8, padding: "10px 14px", color: "#f1f5f9", fontSize: 14, outline: "none", fontFamily: "monospace" }} />
+            <button onClick={handleAnalyze} disabled={loading || !input.trim()}
+              style={{ background: loading ? "#334155" : "linear-gradient(135deg, #6366f1, #8b5cf6)", border: "none", borderRadius: 8, padding: "10px 20px", color: "#fff", fontWeight: 600, fontSize: 14, cursor: loading ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}>
+              {loading ? "Analyzing..." : "Suggest Assignee →"}
+            </button>
+          </div>
+          {error && <p style={{ margin: "10px 0 0", color: "#f87171", fontSize: 13 }}>{error}</p>}
+        </div>
+
+        {loading && (
+          <div style={{ background: "#1e293b", borderRadius: 14, padding: 32, border: "1px solid #334155", textAlign: "center" }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⚙️</div>
+            <p style={{ color: "#94a3b8", fontSize: 14, margin: 0 }}>{stage}</p>
+          </div>
+        )}
+
+        {result && !loading && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, border: "1px solid #334155" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                <span style={{ background: "#ef4444", color: "#fff", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4 }}>BUG</span>
+                <span style={{ fontFamily: "monospace", color: "#6366f1", fontWeight: 700 }}>{result.key}</span>
+                <span style={{ color: "#64748b" }}>·</span>
+                <span style={{ color: "#94a3b8", fontSize: 13 }}>{result.ticketInfo.status}</span>
+                <span style={{ color: "#64748b" }}>·</span>
+                <span style={{ color: "#94a3b8", fontSize: 13 }}>{result.ticketInfo.priority}</span>
+              </div>
+              <p style={{ margin: 0, fontWeight: 600, color: "#f1f5f9", fontSize: 15, lineHeight: 1.6 }}>{result.ticketInfo.summary}</p>
+              {result.ticketInfo.assignee && <p style={{ margin: "8px 0 0", fontSize: 12, color: "#94a3b8" }}>Current assignee: <span style={{ color: "#fbbf24" }}>{result.ticketInfo.assignee}</span></p>}
+            </div>
+
+            {result.analysis.primary && (
+              <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, border: "1px solid #4ade80", position: "relative", overflow: "hidden" }}>
+                <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "linear-gradient(90deg, #22c55e, #16a34a)" }} />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+                  <div>
+                    <p style={{ margin: "0 0 4px", fontSize: 11, fontWeight: 700, color: "#4ade80", textTransform: "uppercase", letterSpacing: "0.05em" }}>✅ Primary Recommendation</p>
+                    <h3 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#f1f5f9" }}>{result.analysis.primary.name}</h3>
+                    {result.analysis.primary.email && <p style={{ margin: "2px 0 0", fontSize: 12, color: "#64748b", fontFamily: "monospace" }}>{result.analysis.primary.email}</p>}
+                  </div>
+                  {result.analysis.primary.confidence && (
+                    <span style={{ background: confColor[result.analysis.primary.confidence] + "22", color: confColor[result.analysis.primary.confidence], border: `1px solid ${confColor[result.analysis.primary.confidence]}44`, padding: "4px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
+                      {result.analysis.primary.confidence} Confidence
+                    </span>
+                  )}
+                </div>
+                <p style={{ margin: 0, color: "#cbd5e1", fontSize: 14, lineHeight: 1.7 }}>{result.analysis.primary.reasoning}</p>
+              </div>
+            )}
+
+            {result.analysis.supportingEvidence?.length > 0 && (
+              <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, border: "1px solid #334155" }}>
+                <p style={{ margin: "0 0 12px", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em" }}>📊 Supporting Evidence</p>
+                <ul style={{ margin: 0, padding: "0 0 0 18px" }}>
+                  {result.analysis.supportingEvidence.map((ev, i) => <li key={i} style={{ color: "#cbd5e1", fontSize: 14, lineHeight: 1.7, marginBottom: 4 }}>{ev}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {result.analysis.alternative && (
+              <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, border: "1px solid #334155" }}>
+                <p style={{ margin: "0 0 10px", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em" }}>🥈 Alternative Option</p>
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                  <div style={{ width: 36, height: 36, borderRadius: "50%", background: "#334155", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flexShrink: 0, fontWeight: 700, color: "#94a3b8" }}>
+                    {result.analysis.alternative.name?.[0] || "?"}
+                  </div>
+                  <div>
+                    <p style={{ margin: "0 0 2px", fontWeight: 600, color: "#f1f5f9", fontSize: 15 }}>{result.analysis.alternative.name}</p>
+                    {result.analysis.alternative.email && <p style={{ margin: "0 0 6px", fontSize: 12, color: "#64748b", fontFamily: "monospace" }}>{result.analysis.alternative.email}</p>}
+                    <p style={{ margin: 0, color: "#94a3b8", fontSize: 13, lineHeight: 1.6 }}>{result.analysis.alternative.reasoning}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {result.analysis.caveat && (
+              <div style={{ background: "#451a03", borderRadius: 14, padding: 16, border: "1px solid #92400e", display: "flex", gap: 10 }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
+                <p style={{ margin: 0, color: "#fcd34d", fontSize: 13, lineHeight: 1.6 }}>{result.analysis.caveat}</p>
+              </div>
+            )}
+
+            {/* Refine Recommendation Panel */}
+            <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, border: "1px solid #4f46e5" }}>
+              <p style={{ margin: "0 0 10px", fontSize: 11, fontWeight: 700, color: "#a5b4fc", textTransform: "uppercase", letterSpacing: "0.05em" }}>✏️ Refine Recommendation</p>
+              <p style={{ margin: "0 0 12px", fontSize: 13, color: "#64748b" }}>Not satisfied? Give additional context or constraints to update the suggestion.</p>
+              <div style={{ display: "flex", gap: 10 }}>
+                <input
+                  value={refineInput}
+                  onChange={e => setRefineInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && !refining && handleRefine()}
+                  placeholder='e.g. "Exclude John, he's OOO" or "Focus on backend engineers"'
+                  style={{ flex: 1, background: "#0f172a", border: "1px solid #475569", borderRadius: 8, padding: "10px 14px", color: "#f1f5f9", fontSize: 13, outline: "none" }}
+                />
+                <button onClick={handleRefine} disabled={refining || !refineInput.trim()}
+                  style={{ background: refining ? "#334155" : "linear-gradient(135deg, #4f46e5, #7c3aed)", border: "none", borderRadius: 8, padding: "10px 18px", color: "#fff", fontWeight: 600, fontSize: 13, cursor: refining ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}>
+                  {refining ? "Refining..." : "Refine →"}
+                </button>
+              </div>
+            </div>
+
+            {result.historicalBugs?.length > 0 && (
+              <div style={{ background: "#1e293b", borderRadius: 14, padding: 20, border: "1px solid #334155" }}>
+                <p style={{ margin: "0 0 14px", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em" }}>🕐 Historical Bugs Used for Analysis</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {result.historicalBugs.slice(0, 6).map((bug, i) => (
+                    <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 10px", background: "#0f172a", borderRadius: 8 }}>
+                      <span style={{ fontFamily: "monospace", color: "#6366f1", fontSize: 12, flexShrink: 0, fontWeight: 700 }}>{bug.key}</span>
+                      <span style={{ color: "#94a3b8", fontSize: 12, flex: 1, lineHeight: 1.5 }}>{bug.summary?.slice(0, 72)}{bug.summary?.length > 72 ? "…" : ""}</span>
+                      <span style={{ color: "#4ade80", fontSize: 11, flexShrink: 0, fontWeight: 600 }}>{bug.assignee}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <button onClick={() => { setResult(null); setInput(""); setRefineInput(""); }} style={{ background: "transparent", border: "1px solid #334155", borderRadius: 8, padding: "10px", color: "#64748b", cursor: "pointer", fontSize: 13 }}>
+              ← Analyze another ticket
+            </button>
+          </div>
+        )}
+
+        {!result && !loading && (
+          <div style={{ textAlign: "center", padding: "40px 24px", color: "#475569" }}>
+            <div style={{ fontSize: 44, marginBottom: 14 }}>🔎</div>
+            <p style={{ fontSize: 15, margin: "0 0 6px", color: "#64748b" }}>Enter any DEFT ticket above to get an AI-powered assignee suggestion</p>
+            <p style={{ fontSize: 13, margin: 0, color: "#475569" }}>Analyzes historical resolution patterns across the DEFT project</p>
+          </div>
+        )}
+
+        <div style={{ marginTop: 32, paddingTop: 20, borderTop: "1px solid #1e293b", textAlign: "center" }}>
+          <p style={{ margin: 0, fontSize: 12, color: "#475569", lineHeight: 1.8 }}>
+            Questions or feedback? Reach out to <span style={{ color: "#6366f1", fontWeight: 600 }}>Isaac Obamehinti</span> (Bug Management Process Driver) via{" "}
+            <a href="https://intuit.enterprise.slack.com/archives/C07TK2ZQULB" target="_blank" rel="noreferrer" style={{ color: "#818cf8", textDecoration: "none" }}
+              onMouseOver={e => e.target.style.textDecoration = "underline"} onMouseOut={e => e.target.style.textDecoration = "none"}>
+              #ics-dsa-deft-bugs
+            </a>
+          </p>
+          <p style={{ margin: "4px 0 0", fontSize: 11, color: "#334155" }}>ICS Data Science & Analytics · DEFT Bug Triage Tool</p>
+        </div>
+      </div>
+    </div>
+  );
+}
